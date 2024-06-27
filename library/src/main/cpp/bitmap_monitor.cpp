@@ -264,8 +264,7 @@ static void* thread_routine(void *) {
             sleep_some_time();
             continue;
         }
-        auto bitmap_records = g_ctx.bitmap_records;
-        std::vector<BitmapRecord> copy_records;
+        auto& bitmap_records = g_ctx.bitmap_records;
 
         if (bitmap_records.empty()) {
             g_ctx.record_mutex.unlock();
@@ -273,16 +272,15 @@ static void* thread_routine(void *) {
             continue;
         }
 
-        int index = 0;
         long long sum_bytes_alloc = 0;
         //check java bitmap object recycle state
-        for (auto it = bitmap_records.begin(); it != bitmap_records.end(); it++) {
-            index++;
+        for (auto it = bitmap_records.begin(); it != bitmap_records.end(); /* ++it */) {
             //1.whether is reachable
             jboolean object_recycled = env->IsSameObject(it->java_bitmap_ref, nullptr);
 
             if (object_recycled == JNI_TRUE) {
                 //not reachable
+                it = bitmap_records.erase(it);
                 continue;
             }
 
@@ -294,35 +292,22 @@ static void* thread_routine(void *) {
             if (bitmap_recycled) {
                 //recycled
                 env->DeleteLocalRef(bitmap_local_ref);
+                it = bitmap_records.erase(it);
                 continue;
             }
 
-            //not recycled, add for next check
+            //not recycled, next check
             sum_bytes_alloc += (it->height * it->stride);
-            copy_records.push_back({
-                                           .native_ptr = it->native_ptr,
-                                           .width =  it->width,
-                                           .height = it->height,
-                                           .stride =  it->stride,
-                                           .format = it->format,
-                                           .time = it->time,
-                                           .large_bitmap_save_path = it->large_bitmap_save_path,
-                                           .java_bitmap_ref = it->java_bitmap_ref,
-                                           .java_stack_jstring = it->java_stack_jstring,
-                                           .current_scene = it->current_scene,
-                                           .restore_succeed = it->restore_succeed,
-                                   });
             env->DeleteLocalRef(bitmap_local_ref);
+
+            ++it;
         }
 
-        if (copy_records.size() != bitmap_records.size()) {
-            g_ctx.bitmap_records = copy_records;
-        }
+        int64_t remain_bitmap_count = bitmap_records.size();
 
         g_ctx.record_mutex.unlock();
 
         //report data
-        int64_t remain_bitmap_count = copy_records.size();
         jobject bitmap_info_jobject = create_bitmap_info_java_object(env, remain_bitmap_count,
                                                                      sum_bytes_alloc, nullptr);
         env->CallStaticVoidMethod(g_ctx.bitmap_monitor_jclass, g_ctx.report_bitmap_data_method,
@@ -420,7 +405,7 @@ jobject do_dump_info(JNIEnv *env, bool justCount, bool ensureRestoreImage) {
         return nullptr;
     }
 
-    auto bitmap_records = g_ctx.bitmap_records;
+    auto& bitmap_records = g_ctx.bitmap_records;
     int64_t remain_bitmap_count = bitmap_records.size();
     long long remain_bitmap_size = 0;
     int index = 0;
@@ -467,12 +452,11 @@ jobject do_dump_info(JNIEnv *env, bool justCount, bool ensureRestoreImage) {
 
         index++;
     }
+    g_ctx.record_mutex.unlock();
 
     jobject bitmap_sum_obj = create_bitmap_info_java_object(env,
                                                             remain_bitmap_count, remain_bitmap_size,
                                                             java_bitmap_record_array);
-
-    g_ctx.record_mutex.unlock();
 
     return bitmap_sum_obj;
 }
